@@ -1,4 +1,4 @@
-{ *******************************************************************************
+{*******************************************************************************
   Copyright 2016-2020 Daniele Spinetti
 
   Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,607 +12,433 @@
   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
   See the License for the specific language governing permissions and
   limitations under the License.
-  ******************************************************************************** }
+  ********************************************************************************}
 
 unit EventBus.Core;
 
 interface
 
 uses
-  System.SyncObjs, EventBus.Subscribers, Generics.Collections,
-  System.SysUtils, System.Classes, EventBus;
+  EventBus;
 
 type
-
-  TEventBus = class(TInterfacedObject, IEventBus)
-  var
-    FTypesOfGivenSubscriber: TObjectDictionary<TObject, TList<TClass>>;
-    FChannelsOfGivenSubscriber: TObjectDictionary<TObject, TList<String>>;
-    FSubscriptionsOfGivenEventType
-      : TObjectDictionary<TClass, TObjectList<TSubscription>>;
-    FSubscriptionsOfGivenChannel
-      : TObjectDictionary<String, TObjectList<TSubscription>>;
-    FCustomClonerDict: TDictionary<String, TCloneEventMethod>;
-    FOnCloneEvent: TCloneEventCallback;
-    procedure SubscribeEvent(ASubscriber: TObject;
-      ASubscriberMethod: TSubscriberMethod);
-    procedure SubscribeChannel(ASubscriber: TObject;
-      ASubscriberMethod: TSubscriberMethod);
-    procedure UnsubscribeByEventType(ASubscriber: TObject; AEventType: TClass);
-    procedure UnsubscribeByChannel(ASubscriber: TObject; AChannel: String);
-    procedure InvokeSubscriber(ASubscription: TSubscription;
-      AEvent: TObject; AEventMM: TEventMM); overload;
-    procedure InvokeSubscriber(ASubscription: TSubscription;
-      AMessage: String); overload;
-    function GenerateTProc(ASubscription: TSubscription; AEvent: TObject; AEventMM: TEventMM)
-      : TProc; overload;
-    function GenerateTProc(ASubscription: TSubscription; AMessage: String)
-      : TProc; overload;
-    function GenerateThreadProc(ASubscription: TSubscription; AEvent: TObject; AEventMM: TEventMM)
-      : TThreadProcedure; overload;
-    function GenerateThreadProc(ASubscription: TSubscription; AMessage: String)
-      : TThreadProcedure; overload;
-  protected
-    procedure SetOnCloneEvent(const aCloneEvent: TCloneEventCallback);
-    function CloneEvent(AEvent: TObject): TObject; virtual;
-    procedure PostToSubscription(ASubscription: TSubscription; AEvent: TObject;
-      AIsMainThread: Boolean; AEventMM: TEventMM); virtual;
-    procedure PostToChannel(ASubscription: TSubscription; AMessage: String;
-      AIsMainThread: Boolean); virtual;
+  TEventBusFactory = class
+  strict private
+    class var FGlobalEventBus: IEventBus;
+    class constructor Create;
   public
-    constructor Create; virtual;
-    destructor Destroy; override;
-    procedure RegisterSubscriberForEvents(ASubscriber: TObject); virtual;
-    procedure RegisterSubscriberForChannels(ASubscriber: TObject); virtual;
-    function IsRegisteredForEvents(ASubscriber: TObject): Boolean;
-    function IsRegisteredForChannels(ASubscriber: TObject): Boolean;
-    procedure UnregisterForEvents(ASubscriber: TObject); virtual;
-    procedure UnregisterForChannels(ASubscriber: TObject); virtual;
-    procedure Post(AEvent: TObject; const AContext: String = '';
-      AEventMM: TEventMM = mmManualAndFreeMainEvent); overload; virtual;
-    procedure Post(const AChannel: String; const AMessage: String);
-      overload; virtual;
-    property TypesOfGivenSubscriber: TObjectDictionary < TObject,
-      TList < TClass >> read FTypesOfGivenSubscriber;
-    property SubscriptionsOfGivenEventType: TObjectDictionary < TClass,
-      TObjectList < TSubscription >> read FSubscriptionsOfGivenEventType;
-    property OnCloneEvent: TCloneEventCallback write SetOnCloneEvent;
-    procedure AddCustomClassCloning(const AQualifiedClassName: String;
-      const aCloneEvent: TCloneEventMethod);
-    procedure RemoveCustomClassCloning(const AQualifiedClassName: String);
+    function CreateEventBus: IEventBus;
+    class property GlobalEventBus: IEventBus read FGlobalEventBus;
   end;
 
 implementation
 
 uses
+  System.Classes,
+  System.Generics.Collections,
   System.Rtti,
-{$IF CompilerVersion >= 28.0}
+  System.SysUtils,
+  {$IF CompilerVersion >= 28.0}
   System.Threading,
-{$ENDIF}
-  RTTIUtilsU;
+  {$ENDIF}
+  EventBus.Helpers,
+  EventBus.Subscribers;
 
-var
-  FMREWSync: TMultiReadExclusiveWriteSynchronizer;
+type
+  {$REGION 'Type aliases to improve readability'}
+  TSubscriptions = TObjectList<TSubscription>;
+  TMethodCategory = string;
+  TMethodCategories = TList<TMethodCategory>;
+  TMethodCategoryToSubscriptionsMap = TObjectDictionary<TMethodCategory, TSubscriptions>;
+  TSubscriberToMethodCategoriesMap = TObjectDictionary<TObject, TMethodCategories>;
 
-  { TEventBus }
+  TAttributeName = string;
+  TMethodCategoryToSubscriptionsByAttributeName = TObjectDictionary<TAttributeName, TMethodCategoryToSubscriptionsMap>;
+  TSubscriberToMethodCategoriesByAttributeName = TObjectDictionary<TAttributeName, TSubscriberToMethodCategoriesMap>;
+  {$ENDREGION}
+
+  TEventBus = class(TInterfacedObject, IEventBus)
+  strict private
+    FCategoryToSubscriptionsByAttrName: TMethodCategoryToSubscriptionsByAttributeName;
+    FMultiReadExclWriteSync: TMultiReadExclusiveWriteSynchronizer;
+    FSubscriberToCategoriesByAttrName: TSubscriberToMethodCategoriesByAttributeName;
+
+    procedure InvokeSubscriber(ASubscription: TSubscription; const Args: array of TValue);
+    function IsRegistered<T: TSubscriberMethodAttribute>(ASubscriber: TObject): Boolean;
+    procedure RegisterSubscriber<T: TSubscriberMethodAttribute>(ASubscriber: TObject);
+    procedure Subscribe<T: TSubscriberMethodAttribute>(ASubscriber: TObject; ASubscriberMethod: TSubscriberMethod);
+    procedure UnregisterSubscriber<T: TSubscriberMethodAttribute>(ASubscriber: TObject);
+    procedure Unsubscribe<T: TSubscriberMethodAttribute>(ASubscriber: TObject; const AMethodCategory: TMethodCategory);
+  protected
+    procedure PostToChannel(ASubscription: TSubscription; const AMessage: string; AIsMainThread: Boolean); virtual;
+    procedure PostToSubscription(ASubscription: TSubscription; const AEvent: IInterface; AIsMainThread: Boolean); virtual;
+  public
+    constructor Create; virtual;
+    destructor Destroy; override;
+
+    {$REGION'IEventBus interface methods'}
+    function IsRegisteredForChannels(ASubscriber: TObject): Boolean;
+    function IsRegisteredForEvents(ASubscriber: TObject): Boolean;
+    procedure Post(const AChannel: string; const AMessage: string); overload; virtual;
+    procedure Post(const AEvent: IInterface; const AContext: string = ''); overload; virtual;
+    procedure RegisterSubscriberForChannels(ASubscriber: TObject); virtual;
+    procedure RegisterSubscriberForEvents(ASubscriber: TObject); virtual;
+    procedure UnregisterForChannels(ASubscriber: TObject); virtual;
+    procedure UnregisterForEvents(ASubscriber: TObject); virtual;
+    {$ENDREGION}
+  end;
 
 constructor TEventBus.Create;
 begin
   inherited Create;
-  FSubscriptionsOfGivenEventType := TObjectDictionary < TClass,
-    TObjectList < TSubscription >>.Create([doOwnsValues]);
-  FTypesOfGivenSubscriber := TObjectDictionary < TObject,
-    TList < TClass >>.Create([doOwnsValues]);
-  FSubscriptionsOfGivenChannel := TObjectDictionary < String,
-    TObjectList < TSubscription >>.Create([doOwnsValues]);
-  FChannelsOfGivenSubscriber := TObjectDictionary < TObject,
-    TList < String >>.Create([doOwnsValues]);
-  FCustomClonerDict := TDictionary<String, TCloneEventMethod>.Create;
+  FMultiReadExclWriteSync := TMultiReadExclusiveWriteSynchronizer.Create;
+  FCategoryToSubscriptionsByAttrName := TMethodCategoryToSubscriptionsByAttributeName.Create([doOwnsValues]);
+  FSubscriberToCategoriesByAttrName := TSubscriberToMethodCategoriesByAttributeName.Create([doOwnsValues]);
 end;
 
 destructor TEventBus.Destroy;
 begin
-  FreeAndNil(FSubscriptionsOfGivenEventType);
-  FreeAndNil(FTypesOfGivenSubscriber);
-  FreeAndNil(FSubscriptionsOfGivenChannel);
-  FreeAndNil(FChannelsOfGivenSubscriber);
-  FreeAndNil(FCustomClonerDict);
+  FCategoryToSubscriptionsByAttrName.Free;
+  FSubscriberToCategoriesByAttrName.Free;
+  FMultiReadExclWriteSync.Free;
   inherited;
 end;
 
-procedure TEventBus.AddCustomClassCloning(const AQualifiedClassName: String;
-  const aCloneEvent: TCloneEventMethod);
-begin
-  FCustomClonerDict.Add(AQualifiedClassName, aCloneEvent);
-end;
-
-function TEventBus.CloneEvent(AEvent: TObject): TObject;
-var
-  LCloneEvent: TCloneEventMethod;
-begin
-  if FCustomClonerDict.TryGetValue(AEvent.QualifiedClassName, LCloneEvent) then
-    Result := LCloneEvent(AEvent)
-  else if Assigned(FOnCloneEvent) then
-    Result := FOnCloneEvent(AEvent)
-  else
-    Result := TRTTIUtils.Clone(AEvent);
-end;
-
-function TEventBus.GenerateThreadProc(ASubscription: TSubscription;
-  AEvent: TObject; AEventMM: TEventMM): TThreadProcedure;
-begin
-  Result := procedure
-    begin
-      if ASubscription.Active then
-      begin
-        ASubscription.SubscriberMethod.Method.Invoke(ASubscription.Subscriber,
-          [AEvent]);
-      end;
-      if (AEventMM = TEventMM.mmAutomatic) then
-        AEvent.Free;
-    end;
-end;
-
-function TEventBus.GenerateThreadProc(ASubscription: TSubscription;
-  AMessage: String): TThreadProcedure;
-begin
-  Result := procedure
-    begin
-      if ASubscription.Active then
-      begin
-        ASubscription.SubscriberMethod.Method.Invoke(ASubscription.Subscriber,
-          [AMessage]);
-      end;
-    end;
-end;
-
-function TEventBus.GenerateTProc(ASubscription: TSubscription;
-  AMessage: String): TProc;
-begin
-  Result := procedure
-    begin
-      if ASubscription.Active then
-      begin
-        ASubscription.SubscriberMethod.Method.Invoke(ASubscription.Subscriber,
-          [AMessage]);
-      end;
-    end;
-end;
-
-function TEventBus.GenerateTProc(ASubscription: TSubscription;
-  AEvent: TObject; AEventMM: TEventMM): TProc;
-begin
-  Result := procedure
-    begin
-      if ASubscription.Active then
-      begin
-        ASubscription.SubscriberMethod.Method.Invoke(ASubscription.Subscriber,
-          [AEvent]);
-      end;
-      if (AEventMM = TEventMM.mmAutomatic) then
-          AEvent.Free;
-    end;
-end;
-
-procedure TEventBus.InvokeSubscriber(ASubscription: TSubscription;
-  AEvent: TObject; AEventMM: TEventMM);
+procedure TEventBus.InvokeSubscriber(ASubscription: TSubscription; const Args: array of TValue);
 begin
   try
-    ASubscription.SubscriberMethod.Method.Invoke(ASubscription.Subscriber,
-      [AEvent]);
-    if (AEventMM = TEventMM.mmAutomatic) then
-        AEvent.Free;
+    if not ASubscription.Active then
+      Exit;
+
+    ASubscription.SubscriberMethod.Method.Invoke(ASubscription.Subscriber, Args);
   except
-    on E: Exception do
-    begin
-      raise Exception.CreateFmt
-        ('Error invoking subscriber method. Subscriber class: %s. Event type: %s. Original exception: %s: %s',
-        [ASubscription.Subscriber.ClassName,
-        ASubscription.SubscriberMethod.EventType.ClassName, E.ClassName,
-        E.Message]);
+    on E: Exception do begin
+      raise EInvokeSubscriberError.CreateFmt(
+        'Error invoking subscriber method. Subscriber class: %s. Event type: %s. Original exception %s: %s.',
+        [
+          ASubscription.Subscriber.ClassName,
+          ASubscription.SubscriberMethod.EventType,
+          E.ClassName,
+          E.Message
+        ]);
     end;
   end;
 end;
 
-procedure TEventBus.InvokeSubscriber(ASubscription: TSubscription;
-  AMessage: String);
+function TEventBus.IsRegistered<T>(ASubscriber: TObject): Boolean;
+var
+  LSubscriberToCategoriesMap: TSubscriberToMethodCategoriesMap;
+  LAttrName: TAttributeName;
 begin
+  FMultiReadExclWriteSync.BeginRead;
+
   try
-    ASubscription.SubscriberMethod.Method.Invoke(ASubscription.Subscriber,
-      [AMessage]);
-  except
-    on E: Exception do
-    begin
-      raise Exception.CreateFmt
-        ('Error invoking subscriber method. Subscriber class: %s. Channel: %s. Original exception: %s: %s',
-        [ASubscription.Subscriber.ClassName,
-        ASubscription.SubscriberMethod.Context, E.ClassName, E.Message]);
-    end;
+    LAttrName := T.ClassName;
+    if not FSubscriberToCategoriesByAttrName.TryGetValue(LAttrName, LSubscriberToCategoriesMap) then
+      Exit(False);
+
+    Result := LSubscriberToCategoriesMap.ContainsKey(ASubscriber);
+  finally
+    FMultiReadExclWriteSync.EndRead;
   end;
 end;
 
 function TEventBus.IsRegisteredForChannels(ASubscriber: TObject): Boolean;
 begin
-  FMREWSync.BeginRead;
-  try
-    Result := FChannelsOfGivenSubscriber.ContainsKey(ASubscriber);
-  finally
-    FMREWSync.EndRead;
-  end;
+  Result := IsRegistered<ChannelAttribute>(ASubscriber);
 end;
 
 function TEventBus.IsRegisteredForEvents(ASubscriber: TObject): Boolean;
 begin
-  FMREWSync.BeginRead;
-  try
-    Result := FTypesOfGivenSubscriber.ContainsKey(ASubscriber);
-  finally
-    FMREWSync.EndRead;
-  end;
+  Result := IsRegistered<SubscribeAttribute>(ASubscriber);
 end;
 
-procedure TEventBus.Post(AEvent: TObject; const AContext: String = '';
-  AEventMM: TEventMM = mmManualAndFreeMainEvent);
+procedure TEventBus.Post(const AChannel, AMessage: string);
 var
-  LSubscriptions: TObjectList<TSubscription>;
-  LSubscription: TSubscription;
-  LEvent: TObject;
-  LIsMainThread: Boolean;
-begin
-  Assert(Assigned(AEvent), 'Event cannot be nil');
-  FMREWSync.BeginRead;
-  try
-    try
-      LIsMainThread := MainThreadID = TThread.CurrentThread.ThreadID;
-
-      FSubscriptionsOfGivenEventType.TryGetValue(AEvent.ClassType,
-        LSubscriptions);
-
-      if (not Assigned(LSubscriptions)) then
-        Exit;
-
-      for LSubscription in LSubscriptions do
-      begin
-
-        if not LSubscription.Active then
-          continue;
-
-        if ((LSubscription.Context <> AContext)) then
-          continue;
-
-        LEvent := CloneEvent(AEvent);
-        PostToSubscription(LSubscription, LEvent, LIsMainThread, AEventMM);
-      end;
-    finally
-      if (AEventMM in [mmAutomatic, mmManualAndFreeMainEvent]) then
-        AEvent.Free;
-    end;
-  finally
-    FMREWSync.EndRead;
-  end;
-end;
-
-procedure TEventBus.PostToChannel(ASubscription: TSubscription;
-  AMessage: String; AIsMainThread: Boolean);
-begin
-  if not Assigned(ASubscription.Subscriber) then
-    Exit;
-
-  case ASubscription.SubscriberMethod.ThreadMode of
-    Posting:
-      InvokeSubscriber(ASubscription, AMessage);
-    Main:
-      if (AIsMainThread) then
-        InvokeSubscriber(ASubscription, AMessage)
-      else
-        TThread.Queue(nil, GenerateThreadProc(ASubscription, AMessage));
-    Background:
-      if (AIsMainThread) then
-{$IF CompilerVersion >= 28.0}
-        TTask.Run(GenerateTProc(ASubscription, AMessage))
-{$ELSE}
-        TThread.CreateAnonymousThread(GenerateTProc(ASubscription,
-          AMessage)).Start
-{$ENDIF}
-      else
-        InvokeSubscriber(ASubscription, AMessage);
-    Async:
-{$IF CompilerVersion >= 28.0}
-      TTask.Run(GenerateTProc(ASubscription, AMessage));
-{$ELSE}
-      TThread.CreateAnonymousThread(GenerateTProc(ASubscription,
-        AMessage)).Start;
-{$ENDIF}
-  else
-    raise Exception.Create('Unknown thread mode');
-  end;
-end;
-
-procedure TEventBus.PostToSubscription(ASubscription: TSubscription;
-  AEvent: TObject; AIsMainThread: Boolean; AEventMM: TEventMM);
-begin
-
-  if not Assigned(ASubscription.Subscriber) then
-    Exit;
-
-  case ASubscription.SubscriberMethod.ThreadMode of
-    Posting:
-      InvokeSubscriber(ASubscription, AEvent, AEventMM);
-    Main:
-      if (AIsMainThread) then
-        InvokeSubscriber(ASubscription, AEvent, AEventMM)
-      else
-        TThread.Queue(nil, GenerateThreadProc(ASubscription, AEvent, AEventMM));
-    Background:
-      if (AIsMainThread) then
-{$IF CompilerVersion >= 28.0}
-        TTask.Run(GenerateTProc(ASubscription, AEvent, AEventMM))
-{$ELSE}
-        TThread.CreateAnonymousThread(GenerateTProc(ASubscription,
-          AEvent, AEventMM)).Start
-{$ENDIF}
-      else
-        InvokeSubscriber(ASubscription, AEvent, AEventMM);
-    Async:
-{$IF CompilerVersion >= 28.0}
-      TTask.Run(GenerateTProc(ASubscription, AEvent, AEventMM));
-{$ELSE}
-      TThread.CreateAnonymousThread(GenerateTProc(ASubscription, AEvent, AEventMM)).Start;
-{$ENDIF}
-  else
-    raise Exception.Create('Unknown thread mode');
-  end;
-
-end;
-
-procedure TEventBus.Post(const AChannel, AMessage: String);
-var
-  LSubscriptions: TObjectList<TSubscription>;
+  LSubscriptions: TSubscriptions;
   LSubscription: TSubscription;
   LIsMainThread: Boolean;
+  LCategoryToSubscriptionsMap: TMethodCategoryToSubscriptionsMap;
+  LAttrName: TAttributeName;
 begin
-  FMREWSync.BeginRead;
+  FMultiReadExclWriteSync.BeginRead;
+
   try
-    LIsMainThread := MainThreadID = TThread.CurrentThread.ThreadID;
-
-    FSubscriptionsOfGivenChannel.TryGetValue(AChannel, LSubscriptions);
-
-    if (not Assigned(LSubscriptions)) then
+    LAttrName := ChannelAttribute.ClassName;
+    if not FCategoryToSubscriptionsByAttrName.TryGetValue(LAttrName, LCategoryToSubscriptionsMap) then
       Exit;
 
-    for LSubscription in LSubscriptions do
-    begin
+    if not LCategoryToSubscriptionsMap.TryGetValue(TSubscriberMethod.EncodeCategory(AChannel), LSubscriptions) then
+      Exit;
 
-      if not LSubscription.Active then
-        continue;
+    LIsMainThread := MainThreadID = TThread.CurrentThread.ThreadID;
 
-      if (LSubscription.Context <> AChannel) then
-        continue;
-
+    for LSubscription in LSubscriptions do begin
+      if (LSubscription.Context <> AChannel) or (not LSubscription.Active) then Continue;
       PostToChannel(LSubscription, AMessage, LIsMainThread);
     end;
   finally
-    FMREWSync.EndRead;
+    FMultiReadExclWriteSync.EndRead;
+  end;
+end;
+
+procedure TEventBus.Post(const AEvent: IInterface; const AContext: string = '');
+var
+  LIsMainThread: Boolean;
+  LSubscription: TSubscription;
+  LSubscriptions: TSubscriptions;
+  LCategoryToSubscriptionsMap: TMethodCategoryToSubscriptionsMap;
+  LEventType: string;
+  LAttrName: TAttributeName;
+begin
+  FMultiReadExclWriteSync.BeginRead;
+
+  try
+    LAttrName := SubscribeAttribute.ClassName;
+    if not FCategoryToSubscriptionsByAttrName.TryGetValue(LAttrName, LCategoryToSubscriptionsMap) then
+      Exit;
+
+    LEventType:= TInterfaceHelper.GetQualifiedName(AEvent);
+    if not LCategoryToSubscriptionsMap.TryGetValue(TSubscriberMethod.EncodeCategory(AContext, LEventType), LSubscriptions) then
+      Exit;
+
+    LIsMainThread := MainThreadID = TThread.CurrentThread.ThreadID;
+
+    for LSubscription in LSubscriptions do begin
+      if not LSubscription.Active then Continue;
+      PostToSubscription(LSubscription, AEvent, LIsMainThread);
+    end;
+  finally
+    FMultiReadExclWriteSync.EndRead;
+  end;
+end;
+
+procedure TEventBus.PostToChannel(ASubscription: TSubscription; const AMessage: string; AIsMainThread: Boolean);
+var
+  LProc: TProc;
+begin
+  if not Assigned(ASubscription.Subscriber) then
+    Exit;
+
+  LProc := procedure begin
+    InvokeSubscriber(ASubscription, [AMessage]);
+  end;
+
+  case ASubscription.SubscriberMethod.ThreadMode of
+    Posting:
+      LProc();
+    Main:
+      if (AIsMainThread) then
+        LProc()
+      else
+        TThread.Queue(nil, TThreadProcedure(LProc));
+    Background:
+      if (AIsMainThread) then
+        {$IF CompilerVersion >= 28.0}
+        TTask.Run(LProc)
+        {$ELSE}
+        TThread.CreateAnonymousThread(LProc).Start
+        {$ENDIF}
+      else
+        LProc();
+    Async:
+      {$IF CompilerVersion >= 28.0}
+      TTask.Run(LProc);
+      {$ELSE}
+      TThread.CreateAnonymousThread(LProc).Start;
+      {$ENDIF}
+  else
+    raise EUnknownThreadMode.CreateFmt('Unknown thread mode: %s.', [Ord(ASubscription.SubscriberMethod.ThreadMode)]);
+  end;
+end;
+
+procedure TEventBus.PostToSubscription(ASubscription: TSubscription; const AEvent: IInterface; AIsMainThread: Boolean);
+var
+  LProc: TProc;
+begin
+  if not Assigned(ASubscription.Subscriber) then
+    Exit;
+
+  LProc := procedure begin
+     InvokeSubscriber(ASubscription, [AEvent as TObject]);
+  end;
+
+  case ASubscription.SubscriberMethod.ThreadMode of
+    Posting:
+      LProc();
+    Main:
+      if (AIsMainThread) then
+        LProc()
+      else
+        TThread.Queue(nil, TThreadProcedure(LProc));
+    Background:
+      if (AIsMainThread) then
+        {$IF CompilerVersion >= 28.0}
+        TTask.Run(LProc)
+        {$ELSE}
+        TThread.CreateAnonymousThread(LProc).Start
+        {$ENDIF}
+      else
+        LProc();
+    Async:
+      {$IF CompilerVersion >= 28.0}
+      TTask.Run(LProc);
+      {$ELSE}
+      TThread.CreateAnonymousThread(LProc)).Start;
+      {$ENDIF}
+  else
+    raise Exception.Create('Unknown thread mode');
+  end;
+end;
+
+procedure TEventBus.RegisterSubscriber<T>(ASubscriber: TObject);
+var
+  LSubscriberClass: TClass;
+  LSubscriberMethods: TArray<TSubscriberMethod>;
+  LSubscriberMethod: TSubscriberMethod;
+begin
+  FMultiReadExclWriteSync.BeginWrite;
+
+  try
+    LSubscriberClass := ASubscriber.ClassType;
+    LSubscriberMethods := TSubscribersFinder.FindSubscriberMethods<T>(LSubscriberClass, True);
+    for LSubscriberMethod in LSubscriberMethods do Subscribe<T>(ASubscriber, LSubscriberMethod);
+  finally
+    FMultiReadExclWriteSync.EndWrite;
   end;
 end;
 
 procedure TEventBus.RegisterSubscriberForChannels(ASubscriber: TObject);
-var
-  LSubscriberClass: TClass;
-  LSubscriberMethods: TArray<TSubscriberMethod>;
-  LSubscriberMethod: TSubscriberMethod;
 begin
-  FMREWSync.BeginWrite;
-  try
-    LSubscriberClass := ASubscriber.ClassType;
-
-    LSubscriberMethods := TSubscribersFinder.FindChannelsSubcriberMethods
-      (LSubscriberClass, true);
-    for LSubscriberMethod in LSubscriberMethods do
-      SubscribeChannel(ASubscriber, LSubscriberMethod);
-  finally
-    FMREWSync.EndWrite;
-  end;
+  RegisterSubscriber<ChannelAttribute>(ASubscriber);
 end;
 
 procedure TEventBus.RegisterSubscriberForEvents(ASubscriber: TObject);
-var
-  LSubscriberClass: TClass;
-  LSubscriberMethods: TArray<TSubscriberMethod>;
-  LSubscriberMethod: TSubscriberMethod;
 begin
-  FMREWSync.BeginWrite;
+  RegisterSubscriber<SubscribeAttribute>(ASubscriber);
+end;
+
+procedure TEventBus.Subscribe<T>(ASubscriber: TObject; ASubscriberMethod: TSubscriberMethod);
+var
+  LNewSubscription: TSubscription;
+  LSubscriptions: TSubscriptions;
+  LCategories: TMethodCategories;
+  LCategory: TMethodCategory;
+  LCategoryToSubscriptionsMap: TMethodCategoryToSubscriptionsMap;
+  LSubscriberToCategoriesMap: TSubscriberToMethodCategoriesMap;
+  LAttrName: TAttributeName;
+begin
+  LAttrName := T.ClassName;
+  if not FCategoryToSubscriptionsByAttrName.ContainsKey(LAttrName) then begin
+    LCategoryToSubscriptionsMap := TMethodCategoryToSubscriptionsMap.Create([doOwnsValues]);
+    FCategoryToSubscriptionsByAttrName.Add(LAttrName, LCategoryToSubscriptionsMap);
+  end else begin
+    LCategoryToSubscriptionsMap := FCategoryToSubscriptionsByAttrName[LAttrName];
+  end;
+
+  LCategory := ASubscriberMethod.Category;
+  LNewSubscription := TSubscription.Create(ASubscriber, ASubscriberMethod);
+
+  if (not LCategoryToSubscriptionsMap.ContainsKey(LCategory)) then begin
+    LSubscriptions := TSubscriptions.Create;
+    LCategoryToSubscriptionsMap.Add(LCategory, LSubscriptions);
+  end else begin
+    LSubscriptions := LCategoryToSubscriptionsMap[LCategory];
+    if (LSubscriptions.Contains(LNewSubscription)) then begin
+      LNewSubscription.Free;
+      raise ESubscriberMethodAlreadyRegistered.CreateFmt('Subscriber %s already registered to %s.', [ASubscriber.ClassName, LCategory]);
+    end;
+  end;
+
+  LSubscriptions.Add(LNewSubscription);
+
+  if not FSubscriberToCategoriesByAttrName.ContainsKey(LAttrName) then begin
+    LSubscriberToCategoriesMap := TSubscriberToMethodCategoriesMap.Create([doOwnsValues]);
+    FSubscriberToCategoriesByAttrName.Add(LAttrName, LSubscriberToCategoriesMap);
+  end else begin
+    LSubscriberToCategoriesMap := FSubscriberToCategoriesByAttrName[LAttrName];
+  end;
+
+  if (not LSubscriberToCategoriesMap.TryGetValue(ASubscriber, LCategories)) then begin
+    LCategories := TMethodCategories.Create;
+    LSubscriberToCategoriesMap.Add(ASubscriber, LCategories);
+  end;
+
+  LCategories.Add(LCategory);
+end;
+
+procedure TEventBus.UnregisterSubscriber<T>(ASubscriber: TObject);
+var
+  LCategories: TMethodCategories;
+  LCategory: TMethodCategory;
+  LSubscriberToCategoriesMap: TSubscriberToMethodCategoriesMap;
+  LAttrName: TAttributeName;
+begin
+  FMultiReadExclWriteSync.BeginWrite;
+
   try
-    LSubscriberClass := ASubscriber.ClassType;
+    LAttrName := T.ClassName;
+    if not FSubscriberToCategoriesByAttrName.TryGetValue(LAttrName, LSubscriberToCategoriesMap) then
+      Exit;
 
-    LSubscriberMethods := TSubscribersFinder.FindEventsSubscriberMethods
-      (LSubscriberClass, true);
-    for LSubscriberMethod in LSubscriberMethods do
-      SubscribeEvent(ASubscriber, LSubscriberMethod);
-
+    if LSubscriberToCategoriesMap.TryGetValue(ASubscriber, LCategories) then begin
+      for LCategory in LCategories do Unsubscribe<T>(ASubscriber, LCategory);
+      LSubscriberToCategoriesMap.Remove(ASubscriber);
+    end;
   finally
-    FMREWSync.EndWrite;
+    FMultiReadExclWriteSync.EndWrite;
   end;
-end;
-
-procedure TEventBus.RemoveCustomClassCloning(const AQualifiedClassName: String);
-begin
-  // No exception is thrown if the key is not in the dictionary
-  FCustomClonerDict.Remove(AQualifiedClassName);
-end;
-
-procedure TEventBus.SetOnCloneEvent(const aCloneEvent: TCloneEventCallback);
-begin
-  FOnCloneEvent := aCloneEvent;
-end;
-
-procedure TEventBus.SubscribeEvent(ASubscriber: TObject;
-  ASubscriberMethod: TSubscriberMethod);
-var
-  LEventType: TClass;
-  LNewSubscription: TSubscription;
-  LSubscriptions: TObjectList<TSubscription>;
-  LSubscribedEvents: TList<TClass>;
-begin
-  LEventType := ASubscriberMethod.EventType;
-  LNewSubscription := TSubscription.Create(ASubscriber, ASubscriberMethod);
-  if (not FSubscriptionsOfGivenEventType.ContainsKey(LEventType)) then
-  begin
-    LSubscriptions := TObjectList<TSubscription>.Create();
-    FSubscriptionsOfGivenEventType.Add(LEventType, LSubscriptions);
-  end
-  else
-  begin
-    LSubscriptions := FSubscriptionsOfGivenEventType.Items[LEventType];
-    if (LSubscriptions.Contains(LNewSubscription)) then
-      raise Exception.CreateFmt('Subscriber %s already registered to event %s ',
-        [ASubscriber.ClassName, LEventType.ClassName]);
-  end;
-
-  LSubscriptions.Add(LNewSubscription);
-
-  if (not FTypesOfGivenSubscriber.TryGetValue(ASubscriber, LSubscribedEvents))
-  then
-  begin
-    LSubscribedEvents := TList<TClass>.Create;
-    FTypesOfGivenSubscriber.Add(ASubscriber, LSubscribedEvents);
-  end;
-  LSubscribedEvents.Add(LEventType);
-end;
-
-procedure TEventBus.SubscribeChannel(ASubscriber: TObject;
-  ASubscriberMethod: TSubscriberMethod);
-var
-  LNewSubscription: TSubscription;
-  LSubscriptions: TObjectList<TSubscription>;
-  LSubscribedChannels: TList<String>;
-  LChannel: string;
-begin
-  LChannel := ASubscriberMethod.Context;
-  LNewSubscription := TSubscription.Create(ASubscriber, ASubscriberMethod);
-  if (not FSubscriptionsOfGivenChannel.ContainsKey(LChannel)) then
-  begin
-    LSubscriptions := TObjectList<TSubscription>.Create();
-    FSubscriptionsOfGivenChannel.Add(LChannel, LSubscriptions);
-  end
-  else
-  begin
-    LSubscriptions := FSubscriptionsOfGivenChannel.Items[LChannel];
-    if (LSubscriptions.Contains(LNewSubscription)) then
-      raise Exception.CreateFmt
-        ('Subscriber %s already registered to channel %s ',
-        [ASubscriber.ClassName, LChannel]);
-  end;
-
-  LSubscriptions.Add(LNewSubscription);
-
-  if (not FChannelsOfGivenSubscriber.TryGetValue(ASubscriber,
-    LSubscribedChannels)) then
-  begin
-    LSubscribedChannels := TList<String>.Create;
-    FChannelsOfGivenSubscriber.Add(ASubscriber, LSubscribedChannels);
-  end;
-  LSubscribedChannels.Add(LChannel);
 end;
 
 procedure TEventBus.UnregisterForChannels(ASubscriber: TObject);
-var
-  LSubscribedChannelTypes: TList<string>;
-  LChannel: String;
 begin
-  FMREWSync.BeginWrite;
-  try
-    if FChannelsOfGivenSubscriber.TryGetValue(ASubscriber,
-      LSubscribedChannelTypes) then
-    begin
-      for LChannel in LSubscribedChannelTypes do
-        UnsubscribeByChannel(ASubscriber, LChannel);
-      FChannelsOfGivenSubscriber.Remove(ASubscriber);
-    end;
-    // else {
-    // Log.w(TAG, "Subscriber to unregister was not registered before: " + subscriber.getClass());
-    // }
-  finally
-    FMREWSync.EndWrite;
-  end;
+  UnregisterSubscriber<ChannelAttribute>(ASubscriber);
 end;
 
 procedure TEventBus.UnregisterForEvents(ASubscriber: TObject);
-var
-  LSubscribedTypes: TList<TClass>;
-  LEventType: TClass;
 begin
-  FMREWSync.BeginWrite;
-  try
-    if FTypesOfGivenSubscriber.TryGetValue(ASubscriber, LSubscribedTypes) then
-    begin
-      for LEventType in LSubscribedTypes do
-        UnsubscribeByEventType(ASubscriber, LEventType);
-      FTypesOfGivenSubscriber.Remove(ASubscriber);
-    end;
-
-    // else {
-    // Log.w(TAG, "Subscriber to unregister was not registered before: " + subscriber.getClass());
-    // }
-  finally
-    FMREWSync.EndWrite;
-  end;
+  UnregisterSubscriber<SubscribeAttribute>(ASubscriber);
 end;
 
-procedure TEventBus.UnsubscribeByChannel(ASubscriber: TObject;
-  AChannel: String);
+procedure TEventBus.Unsubscribe<T>(ASubscriber: TObject; const AMethodCategory: TMethodCategory);
 var
   LSubscriptions: TObjectList<TSubscription>;
   LSize, I: Integer;
   LSubscription: TSubscription;
+  LCategoryToSubscriptionsMap: TMethodCategoryToSubscriptionsMap;
+  LAttrName: TAttributeName;
 begin
-  LSubscriptions := FSubscriptionsOfGivenChannel.Items[AChannel];
-  if (not Assigned(LSubscriptions)) or (LSubscriptions.Count < 1) then
+  LAttrName := T.ClassName;
+  if not FCategoryToSubscriptionsByAttrName.TryGetValue(LAttrName, LCategoryToSubscriptionsMap) then
     Exit;
+
+  if not LCategoryToSubscriptionsMap.TryGetValue(AMethodCategory, LSubscriptions) then
+    Exit;
+
+  if (LSubscriptions.Count < 1) then
+    Exit;
+
   LSize := LSubscriptions.Count;
-  for I := LSize - 1 downto 0 do
-  begin
+
+  for I := LSize - 1 downto 0 do begin
     LSubscription := LSubscriptions[I];
-    // Notes: In case the subscriber has been freed but it didn't unregister itself, calling
-    // LSubscription.Subscriber.Equals() will cause Access Violation, so we use '=' instead.
-    if LSubscription.Subscriber = ASubscriber then
-    begin
-      LSubscription.Active := false;
+    // Note - If the subscriber has been freed without unregistering itself, calling
+    // LSubscription.Subscriber.Equals() will cause Access Violation, hence use '=' instead.
+    if LSubscription.Subscriber = ASubscriber then begin
+      LSubscription.Active := False;
       LSubscriptions.Delete(I);
     end;
   end;
 end;
 
-procedure TEventBus.UnsubscribeByEventType(ASubscriber: TObject;
-  AEventType: TClass);
-var
-  LSubscriptions: TObjectList<TSubscription>;
-  LSize, I: Integer;
-  LSubscription: TSubscription;
+class constructor TEventBusFactory.Create;
 begin
-  LSubscriptions := FSubscriptionsOfGivenEventType.Items[AEventType];
-  if (not Assigned(LSubscriptions)) or (LSubscriptions.Count < 1) then
-    Exit;
-  LSize := LSubscriptions.Count;
-  for I := LSize - 1 downto 0 do
-  begin
-    LSubscription := LSubscriptions[I];
-    // Notes: In case the subscriber has been freed but it didn't unregister itself, calling
-    // LSubscription.Subscriber.Equals() will cause Access Violation, so we use '=' instead.
-    if LSubscription.Subscriber = ASubscriber then
-    begin
-      LSubscription.Active := false;
-      LSubscriptions.Delete(I);
-    end;
-  end;
+  FGlobalEventBus := TEventBus.Create;
 end;
 
-initialization
-
-FMREWSync := TMultiReadExclusiveWriteSynchronizer.Create;
-
-finalization
-
-FMREWSync.Free;
+function TEventBusFactory.CreateEventBus: IEventBus;
+begin
+  Result := TEventBus.Create;
+end;
 
 end.

@@ -6,33 +6,34 @@ uses
   System.SysUtils, System.Types, System.UITypes, System.Classes,
   System.Variants, FMX.Types, FMX.Graphics, FMX.Controls, FMX.Forms,
   FMX.Dialogs, FMX.StdCtrls, FMX.Controls.Presentation, FMX.Layouts,
-  FMX.Objects, FMX.Edit, FMX.TabControl, BOsU, EventBus;
+  FMX.Objects, FMX.Edit, FMX.TabControl, BOsU, EventBus, ServicesU;
 
 type
   THeaderFooterForm = class(TForm)
-    Header: TToolBar;
-    HeaderLabel: TLabel;
-    GridPanelLayout1: TGridPanelLayout;
+    AniIndicator1: TAniIndicator;
+    Button1: TButton;
+    Button2: TButton;
     Edit1: TEdit;
     Edit2: TEdit;
-    Button1: TButton;
-    AniIndicator1: TAniIndicator;
+    GridPanelLayout1: TGridPanelLayout;
+    GridPanelLayout2: TGridPanelLayout;
+    Header: TToolBar;
+    HeaderLabel: TLabel;
     TabControl1: TTabControl;
-    Text1: TText;
     TabItem1: TTabItem;
     TabItem2: TTabItem;
-    GridPanelLayout2: TGridPanelLayout;
-    Button2: TButton;
+    Text1: TText;
     Text2: TText;
     procedure Button1Click(Sender: TObject);
-    procedure FormCreate(Sender: TObject);
     procedure Button2Click(Sender: TObject);
+    procedure FormCreate(Sender: TObject);
   private
     { Private declarations }
+    FRemoteDataContext: IRemoteDataContext;
   public
     { Public declarations }
     [Subscribe(TThreadMode.Main)]
-    procedure OnAfterLogin(AEvent: TOnLoginEvent);
+    procedure OnAfterLogin(AEvent: IOnLoginEvent);
   end;
 
 var
@@ -40,19 +41,16 @@ var
 
 implementation
 
-uses
-  ServicesU;
-
 {$R *.fmx}
 
 procedure THeaderFooterForm.Button1Click(Sender: TObject);
 var
-  lLoginDTO: TLoginDTO;
+  LLoginDTO: TLoginDTO;
 begin
   AniIndicator1.Enabled := true;
   Button1.Enabled := false;
-  lLoginDTO := TLoginDTO.Create(Edit1.Text, Edit2.Text);
-  GetAccessRemoteDataProxyInstance.DoLogin(lLoginDTO);
+  LLoginDTO := TLoginDTO.Create(Edit1.Text, Edit2.Text);
+  FRemoteDataContext.Login(LLoginDTO);
 end;
 
 procedure THeaderFooterForm.Button2Click(Sender: TObject);
@@ -63,11 +61,12 @@ end;
 procedure THeaderFooterForm.FormCreate(Sender: TObject);
 begin
   TabControl1.ActiveTab := TabItem1;
+  FRemoteDataContext:= CreateRemoteDataContext;
   // register subscribers
   GlobalEventBus.RegisterSubscriberForEvents(Self);
 end;
 
-procedure THeaderFooterForm.OnAfterLogin(AEvent: TOnLoginEvent);
+procedure THeaderFooterForm.OnAfterLogin(AEvent: IOnLoginEvent);
 begin
   AniIndicator1.Enabled := false;
   Button1.Enabled := true;
@@ -76,4 +75,3 @@ begin
 end;
 
 end.
-
