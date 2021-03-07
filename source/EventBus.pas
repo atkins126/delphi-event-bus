@@ -105,6 +105,23 @@ type
     procedure RegisterSubscriberForChannels(ASubscriber: TObject);
 
     /// <summary>
+    ///   Registers a new subscriber for named-channel messages.
+    /// </summary>
+    /// <param name="ASubscriber">
+    ///   The subscriber object to register, which should have methods with
+    ///   Channel attribute.
+    /// </param>
+    /// <exception cref="EInvalidSubscriberMethod">
+    ///   Throws whenever a subscriber method of the subscriber object has
+    ///   invalid number of arguments or invalid argument type.
+    /// </exception>
+    /// <remarks>
+    ///   There won't be any exception thrown if the subscriber object has no
+    ///   subscriber methods defined.
+    /// </remarks>
+    procedure SilentRegisterSubscriberForChannels(ASubscriber: TObject);
+
+    /// <summary>
     ///   Unregisters a subscriber from receiving named-channel messages.
     /// </summary>
     /// <param name="ASubscriber">
@@ -117,7 +134,7 @@ type
     /// </summary>
     /// <param name="ASubscriber">
     ///   The subscriber object to register, which should have methods with
-    ///   Subscribe attributes. attribute.
+    ///   Subscribe attributes.
     /// </param>
     /// <exception cref="EInvalidSubscriberMethod">
     ///   Throws whenever a subscriber method of the subscriber object has
@@ -130,12 +147,46 @@ type
     procedure RegisterSubscriberForEvents(ASubscriber: TObject);
 
     /// <summary>
+    ///   Registers a subscriber for interface-typed events.
+    /// </summary>
+    /// <param name="ASubscriber">
+    ///   The subscriber object to register, which should have methods with
+    ///   Subscribe attributes.
+    /// </param>
+    /// <exception cref="EInvalidSubscriberMethod">
+    ///   Throws whenever a subscriber method of the subscriber object has
+    ///   invalid number of arguments or invalid argument type.
+    /// </exception>
+    /// <remarks>
+    ///   There won't be any exception thrown if the subscriber object has no
+    ///   subscriber methods defined.
+    /// </remarks>
+    procedure SilentRegisterSubscriberForEvents(ASubscriber: TObject);
+
+    /// <summary>
     ///   Unregisters a subscriber from receiving interface-typed events.
     /// </summary>
     /// <param name="ASubscriber">
     ///   The subscriber object to unregister.
     /// </param>
     procedure UnregisterForEvents(ASubscriber: TObject);
+
+    /// <summary>
+    ///   Register a new context for a given event of a specific subscriber.
+    /// </summary>
+    /// <param name="ASubscriber">
+    ///   The subscriber object who holds the event.
+    /// </param>
+    /// <param name="AEvent">
+    ///   The event you want to change the context.
+    /// </param>
+    /// <param name="ANewContext">
+    ///   The old context value to replace.
+    /// </param>
+    /// <param name="ANewContext">
+    ///   The new context value.
+    /// </param>
+    procedure RegisterNewContext(ASubscriber: TObject; AEvent: IInterface; const AOldContext: String; const ANewContext: String);
   end;
 
 type
