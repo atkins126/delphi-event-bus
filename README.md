@@ -92,8 +92,13 @@ GlobalEventBus.post(MY_CHANNEL, 'My Message');
 ## Support
 * DEB is a 100% ObjectPascal framework so it works on VCL and Firemonkey
 * It works with Delphi2010 and major
+* It works with latest version Alexandria
 
 ## Release Notes
+
+### DEB 2.1
+
+* NEW! Introduced dedicated thread pool for DEB threading 
 
 ### DEB 2.0
 
@@ -108,7 +113,7 @@ GlobalEventBus.post(MY_CHANNEL, 'My Message');
 
 
 ## License
-  Copyright 2016-2020 Daniele Spinetti
+  Copyright 2016-2022 Daniele Spinetti
 
   Licensed under the Apache License, Version 2.0 (the "License");
   you may not use this file except in compliance with the License.
